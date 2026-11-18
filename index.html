@@ -83,6 +83,25 @@
   .tag.bad{background:var(--bad-wash);color:var(--bad);}
   .tag.neu{background:#ECEDEA;color:var(--ink-soft);}
   .tag.blue{background:var(--acc-wash);color:var(--acc);}
+  /* validity bands: expired / ≤30 / 31–60 / >60 days */
+  .xp{display:inline-flex;flex-direction:column;align-items:center;gap:2px;line-height:1.2;}
+  .xp .sub{font-variant-numeric:tabular-nums;}
+  .b{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border:1px solid;border-radius:2px;white-space:nowrap;}
+  .b.exp{background:#FBE3DF;color:#A3271B;border-color:#EBB0A7;}
+  .b.urg{background:#FDEDE3;color:#B4470F;border-color:#F2C2A3;}
+  .b.soon{background:#FDF5DA;color:#7F5B00;border-color:#E7D08A;}
+  .b.ok{background:#E8F4EC;color:#2F6E43;border-color:#B9D9C3;}
+  .cards.bands{grid-template-columns:repeat(4,minmax(0,1fr));}
+  .card.pick{cursor:pointer;text-align:start;font:inherit;color:inherit;width:100%;}
+  .card.pick:hover{border-color:var(--ink-grey);}
+  .card.pick[aria-pressed="true"]{border:2px solid var(--acc);padding:11px 13px;background:#fff;}
+  .card .v.exp{color:#A3271B;} .card .v.urg{color:#B4470F;} .card .v.soon{color:#7F5B00;} .card .v.ok{color:#2F6E43;}
+  .segs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
+  .seg{background:#fff;border:1px solid var(--hairline);border-radius:2px;padding:8px 14px;cursor:pointer;font-size:14px;white-space:nowrap;}
+  .seg:hover{border-color:var(--ink-soft);}
+  .seg[aria-pressed="true"]{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600;}
+  td.note{white-space:normal;min-width:120px;max-width:220px;font-size:13px;color:var(--ink-soft);}
+  @media (max-width:700px){ .cards.bands{grid-template-columns:repeat(2,minmax(0,1fr));} }
   .empty{text-align:center;color:var(--ink-grey);padding:30px 10px;}
   .row-actions{display:flex;gap:2px;}
   h2{font-size:17px;margin:4px 0 12px;}
@@ -207,10 +226,10 @@ const auth = firebase.auth(), db = firebase.firestore();
 const COLS = ['vehicles','drivers','assignments','services','expenses','documents'];
 const S = {vehicles:[],drivers:[],assignments:[],services:[],expenses:[],documents:[]};
 let user = null, tab = 'dash', unsubs = [];
-const ui = {vq:'',vst:'active',dq:'',sv:'',st:'',ev:'',ec:'',from:'',to:''};
+const ui = {vq:'',vgrp:'',vband:'',vcorp:'',vtype:'',dq:'',sv:'',st:'',ev:'',ec:'',from:'',to:''};
 
 const FUEL = {petrol:'בנזין',diesel:'סולר',hybrid:'היברידי',electric:'חשמלי'};
-const VSTAT = {active:'פעיל',garage:'במוסך',inactive:'לא פעיל'};
+const VSTAT = {active:'פעיל',garage:'במוסך',inactive:'נמכר / מושבת'};
 const OWN = {owned:'בבעלות',leasing:'ליסינג',rental:'השכרה'};
 const STYPE = {periodic:'טיפול תקופתי',repair:'תיקון',tires:'צמיגים',test:'טסט שנתי',body:'פחחות / תאונה',other:'אחר'};
 const ECAT = {fuel:'דלק',charge:'טעינה',toll:'כביש אגרה',parking:'חניה',fine:'דוח / קנס',wash:'שטיפה',insurance:'ביטוח',license:'אגרת רישוי',other:'אחר'};
@@ -262,11 +281,23 @@ function serviceDue(v){
   return {level, text: parts.join(' · '), nextKm:r.nextKm, nextDate:r.nextDate};
 }
 function expLevel(date){ if (!date) return null; const d = daysTo(date); return d<0 ? 'bad' : d<=30 ? 'warn' : 'ok'; }
-function expTag(date){
+// 4 bands shown to users: expired / urgent (≤30 days) / soon (31–60) / ok (>60)
+function band(date){ if (!date) return ''; const d = daysTo(date); return d<0 ? 'exp' : d<=30 ? 'urg' : d<=60 ? 'soon' : 'ok'; }
+function expTag(date, note){
   if (!date) return '<span class="sub">—</span>';
-  const d = daysTo(date), l = expLevel(date);
-  const extra = d<0 ? ` · פג` : d<=30 ? ` · ${d} ימים` : '';
-  return `<span class="tag ${l}">${fmtD(date)}${extra}</span>`;
+  const d = daysTo(date);
+  const label = d<0 ? `פג לפני ${-d} ימים` : d===0 ? 'פג היום' : d===1 ? 'עוד יום אחד' : `עוד ${d} ימים`;
+  return `<span class="xp"><span class="b ${band(date)}">${label}</span><span class="sub">${fmtD(date)}${note?' · '+esc(note):''}</span></span>`;
+}
+// earliest of mandatory / comprehensive insurance
+function insDate(v){
+  const c = [['חובה',v.insuranceExpiry],['מקיף',v.compExpiry]].filter(x=>x[1]).sort((a,b)=>a[1].localeCompare(b[1]));
+  return c.length ? {date:c[0][1], kind: c.length>1 ? c[0][0] : ''} : null;
+}
+// worst band across test + insurance
+function vehicleBand(v){
+  const ds = [v.licenseExpiry, v.insuranceExpiry, v.compExpiry].filter(Boolean).sort();
+  return ds.length ? band(ds[0]) : '';
 }
 function alerts(){
   const out = [];
@@ -296,7 +327,8 @@ function fieldHtml(f, v){
   if (f.type==='select') inp = `<select id="${id}" name="${f.k}" ${f.req?'required':''}>${f.opts.map(o=>`<option value="${esc(o.v)}" ${String(o.v)===String(val)?'selected':''}>${esc(o.t)}</option>`).join('')}</select>`;
   else if (f.type==='textarea') inp = `<textarea id="${id}" name="${f.k}">${esc(val)}</textarea>`;
   else if (f.type==='checkbox') return `<div class="field chk ${f.full?'full':''}"><label><input type="checkbox" id="${id}" name="${f.k}" ${val?'checked':''}> ${esc(f.label)}</label></div>`;
-  else inp = `<input id="${id}" name="${f.k}" type="${f.type||'text'}" ${f.type==='number'?'step="any" min="0" inputmode="decimal"':''} value="${esc(val)}" ${f.req?'required':''} ${f.ph?`placeholder="${esc(f.ph)}"`:''}>`;
+  else inp = `<input id="${id}" name="${f.k}" type="${f.type||'text'}" ${f.type==='number'?'step="any" min="0" inputmode="decimal"':''} value="${esc(val)}" ${f.req?'required':''} ${f.ph?`placeholder="${esc(f.ph)}"`:''} ${f.list?`list="${id}_l" autocomplete="off"`:''}>`
+    + (f.list ? `<datalist id="${id}_l">${f.list.map(x=>`<option value="${esc(x)}">`).join('')}</datalist>` : '');
   return `<div class="field ${f.full?'full':''}"><label for="${id}">${esc(f.label)}${f.req?' *':''}</label>${inp}${f.help?`<div class="sub">${esc(f.help)}</div>`:''}</div>`;
 }
 function openForm({title, fields, values={}, onSave, onDelete, hint, onInput}){
@@ -334,6 +366,12 @@ $('#fDel').addEventListener('click', async () => {
 document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => b.closest('dialog').close()));
 
 /* ---------- forms per entity ---------- */
+const distinct = (k, extra=[]) => [...new Set([...extra, ...S.vehicles.map(v=>v[k]).filter(Boolean)])].sort((a,b)=>String(a).localeCompare(String(b),'he'));
+async function deleteVehicle(v){
+  const used = S.services.some(s=>s.vehicleId===v.id) || S.expenses.some(e=>e.vehicleId===v.id) || S.assignments.some(a=>a.vehicleId===v.id) || S.documents.some(d=>d.ownerType==='v' && d.ownerId===v.id);
+  if (used){ alert('לרכב יש היסטוריה (טיפולים / הוצאות / שיוכים / מסמכים). במקום למחוק, שנה את הסטטוס ל"נמכר / מושבת".'); return false; }
+  await db.collection('vehicles').doc(v.id).delete(); if ($('#cardDlg').open) $('#cardDlg').close();
+}
 function vehicleForm(v){
   const fields = [
     {sec:'פרטי רכב'},
@@ -345,8 +383,13 @@ function vehicleForm(v){
     {k:'color',label:'צבע'},
     {k:'fuel',label:'סוג הנעה',type:'select',opts:opts(FUEL),def:'petrol'},
     {k:'ownership',label:'בעלות',type:'select',opts:opts(OWN),def:'owned'},
-    {k:'leaseCompany',label:'חברת ליסינג / בעלים'},
+    {k:'leaseCompany',label:'חברת ליסינג / בעלים',list:distinct('leaseCompany')},
     {k:'km',label:'קילומטראז\' נוכחי',type:'number'},
+    {sec:'סיווג'},
+    {k:'vtype',label:'סוג כלי',list:distinct('vtype',['רכב פרטי','רכב מסחרי','טנדר','משאית','טרקטור','מלגזה','צ\'יפ']),ph:'רכב פרטי / טרקטור / מלגזה'},
+    {k:'group',label:'קבוצה',list:distinct('group'),help:'לפי הקבוצה נבנות הלשוניות ברשימת הרכבים'},
+    {k:'corp',label:'תאגיד',list:distinct('corp',[COMPANY])},
+    {k:'usage',label:'שימוש',list:distinct('usage'),help:'מוצג כשאין נהג משויך (למשל: בית אריזה)'},
     {sec:'תוקף מסמכים'},
     {k:'licenseExpiry',label:'רישיון רכב (טסט) בתוקף עד',type:'date'},
     {k:'insuranceExpiry',label:'ביטוח חובה בתוקף עד',type:'date'},
@@ -361,11 +404,7 @@ function vehicleForm(v){
       await save('vehicles', v && v.id, o);
       if (v && $('#cardDlg').open) vehicleCard(v.id);
     },
-    onDelete: v ? async () => {
-      const used = S.services.some(s=>s.vehicleId===v.id) || S.expenses.some(e=>e.vehicleId===v.id) || S.assignments.some(a=>a.vehicleId===v.id);
-      if (used){ alert('לרכב יש היסטוריה (טיפולים/הוצאות/שיוכים). במקום למחוק, שנה את הסטטוס ל"לא פעיל".'); return false; }
-      await db.collection('vehicles').doc(v.id).delete(); $('#cardDlg').close();
-    } : null
+    onDelete: v ? () => deleteVehicle(v) : null
   });
 }
 function driverForm(d){
@@ -648,26 +687,50 @@ function vehicleLevel(v){
   const ls = ['licenseExpiry','insuranceExpiry','compExpiry'].map(k=>expLevel(v[k])); const sd = serviceDue(v); if (sd) ls.push(sd.level);
   return ls.includes('bad') ? 'bad' : ls.includes('warn') ? 'warn' : '';
 }
+const BANDS = [['exp','פג תוקף (טסט או ביטוח)'],['urg','דחוף — תוך 30 יום'],['soon','התראה — 31 עד 60 יום'],['ok','תקין (מעל 60 יום)']];
 function renderVehicles(){
+  const live = S.vehicles.filter(v => v.status!=='inactive'), dead = S.vehicles.filter(v => v.status==='inactive');
+  const groups = [...new Set(live.map(v=>v.group).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'he'));
+  if (ui.vgrp && ui.vgrp!=='__off' && !groups.includes(ui.vgrp)) ui.vgrp = '';
+  const scope = ui.vgrp==='__off' ? dead : ui.vgrp ? live.filter(v=>v.group===ui.vgrp) : live;
+  const cnt = {}; scope.forEach(v => { const b = vehicleBand(v); if (b) cnt[b] = (cnt[b]||0)+1; });
   const q = ui.vq.toLowerCase();
-  const rows = sortedVehicles().filter(v => (!ui.vst || v.status===ui.vst) &&
-    (!q || [v.plate,v.make,v.model,dName((openAssignment(v.id)||{}).driverId)].join(' ').toLowerCase().includes(q)));
+  const rows = scope.filter(v => (!ui.vband || vehicleBand(v)===ui.vband) && (!ui.vcorp || v.corp===ui.vcorp) && (!ui.vtype || v.vtype===ui.vtype) &&
+      (!q || [v.plate, String(v.plate).replace(/\D/g,''), v.make, v.model, v.leaseCompany, v.corp, v.group, v.vtype, v.usage, v.notes, dName((openAssignment(v.id)||{}).driverId)].join(' ').toLowerCase().includes(q)))
+    .sort((a,b) => String(a.make||'').localeCompare(String(b.make||''),'he') || String(a.model||'').localeCompare(String(b.model||''),'he') || String(a.plate).localeCompare(String(b.plate)));
+  const sel = (id, all, vals, cur) => `<select id="${id}"><option value="">${all}</option>${vals.map(x=>`<option ${x===cur?'selected':''}>${esc(x)}</option>`).join('')}</select>`;
+  const seg = (k, label, n) => `<button class="seg" data-vgrp="${esc(k)}" aria-pressed="${ui.vgrp===k}">${esc(label)} (${n})</button>`;
   return `
+    <div class="cards bands">${BANDS.map(([b,label]) => `<button class="card pick" data-vband="${b}" aria-pressed="${ui.vband===b}"><div class="k">${label}</div><div class="v ${b}">${cnt[b]||0}</div></button>`).join('')}</div>
+    <div class="segs">
+      ${seg('', 'כל הכלים הפעילים', live.length)}
+      ${groups.map(g => seg(g, g, live.filter(v=>v.group===g).length)).join('')}
+      ${dead.length ? seg('__off', 'נמכרו / מושבתים', dead.length) : ''}
+    </div>
     <div class="toolbar">
       <button class="btn primary" id="addV">רכב חדש</button>
-      <input type="search" id="vq" placeholder="חיפוש לפי מספר, דגם או נהג" value="${esc(ui.vq)}">
-      <select id="vst">${opts(VSTAT,'כל הסטטוסים').map(o=>`<option value="${o.v}" ${o.v===ui.vst?'selected':''}>${o.t}</option>`).join('')}</select>
-      <span class="sp"></span><span class="sub">${rows.length} רכבים</span>
+      <input type="search" id="vq" placeholder="חיפוש לפי מס' רישוי, יצרן, דגם, נהג / שימוש, בעלות..." value="${esc(ui.vq)}" style="max-width:none;flex:3 1 260px">
+      ${sel('vcorp', 'כל התאגידים', distinct('corp'), ui.vcorp)}
+      ${sel('vtype', 'כל סוגי הכלים', distinct('vtype'), ui.vtype)}
+      <button class="btn" id="vReset">איפוס סינון</button>
+      <span class="sub">${rows.length} כלים</span>
     </div>
-    ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>מספר רישוי</th><th>רכב</th><th>נהג</th><th>סטטוס</th><th class="num">ק"מ</th><th>טסט</th><th>ביטוח חובה</th><th>טיפול הבא</th></tr></thead><tbody>
-      ${rows.map(v=>{ const a=openAssignment(v.id), sd=serviceDue(v); return `<tr>
-        <td><button class="lnk" data-veh="${v.id}">${plateHtml(v)}</button></td>
-        <td>${esc(vName(v))}${v.year?` <span class="sub">${v.year}</span>`:''}</td>
-        <td>${a?`<button class="lnk" data-drv="${a.driverId}">${esc(dName(a.driverId))}</button>`:'<span class="sub">—</span>'}</td>
-        <td><span class="tag ${v.status==='active'?'ok':v.status==='garage'?'warn':'neu'}">${esc(VSTAT[v.status]||'')}</span></td>
-        <td class="num">${km(v.km)}</td><td>${expTag(v.licenseExpiry)}</td><td>${expTag(v.insuranceExpiry)}</td>
-        <td>${sd?`<span class="tag ${sd.level}">${esc(sd.text)}</span>`:'<span class="sub">—</span>'}</td></tr>`;}).join('')}
-    </tbody></table></div>` : `<div class="tbl-wrap"><div class="empty">${S.vehicles.length?'אין רכבים מתאימים לסינון':'עדיין לא הוגדרו רכבים'}</div></div>`}`;
+    ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>יצרן</th><th>דגם / סוג</th><th>שנה</th><th>מס' רישוי</th><th>תוקף טסט</th><th>תוקף ביטוח</th><th>בעלות</th><th>שימוש / נהג</th><th>מנוע</th><th>תאגיד</th><th>הערות</th><th>פעולות</th></tr></thead><tbody>
+      ${rows.map((v,i)=>{ const a = openAssignment(v.id), ins = insDate(v); return `<tr>
+        <td class="sub">${i+1}</td>
+        <td><b>${esc(v.make)}</b></td>
+        <td>${esc(v.model)}${v.vtype?` <span class="sub">${esc(v.vtype)}</span>`:''}</td>
+        <td>${esc(v.year||'')}</td>
+        <td><button class="lnk" data-veh="${v.id}" title="פתיחת כרטיס הרכב">${plateHtml(v)}</button>${v.status==='garage'?' <span class="tag warn">במוסך</span>':''}</td>
+        <td style="text-align:center">${expTag(v.licenseExpiry)}</td>
+        <td style="text-align:center" ${v.insuranceExpiry&&v.compExpiry?`title="חובה: ${fmtD(v.insuranceExpiry)} · מקיף: ${fmtD(v.compExpiry)}"`:''}>${ins ? expTag(ins.date, ins.kind) : expTag('')}</td>
+        <td>${esc(v.leaseCompany || OWN[v.ownership] || '')}</td>
+        <td>${a ? `<button class="lnk" data-drv="${a.driverId}">${esc(dName(a.driverId))}</button>` : esc(v.usage||'') || '<span class="sub">—</span>'}</td>
+        <td>${esc(FUEL[v.fuel]||'')}</td>
+        <td>${esc(v.corp||'')}</td>
+        <td class="note">${esc(v.notes||'')}</td>
+        <td><div class="row-actions"><button class="btn sm" data-vedit="${v.id}">ערוך</button><button class="btn sm danger" data-vdel="${v.id}">מחק</button></div></td></tr>`;}).join('')}
+    </tbody></table></div>` : `<div class="tbl-wrap"><div class="empty">${S.vehicles.length?'אין כלים מתאימים לסינון':'עדיין לא הוגדרו רכבים'}</div></div>`}`;
 }
 function renderDrivers(){
   const q = ui.dq.toLowerCase();
@@ -768,6 +831,14 @@ $('#view').addEventListener('click', e => {
   if (b.dataset.drv) return driverCard(b.dataset.drv);
   if (b.dataset.srv) return serviceForm(byId('services', b.dataset.srv));
   if (b.dataset.exp) return expenseForm(byId('expenses', b.dataset.exp));
+  if (b.dataset.vband){ ui.vband = ui.vband===b.dataset.vband ? '' : b.dataset.vband; return render(); }
+  if (b.dataset.vgrp != null){ ui.vgrp = b.dataset.vgrp; return render(); }
+  if (b.dataset.vedit) return vehicleForm(byId('vehicles', b.dataset.vedit));
+  if (b.dataset.vdel){
+    const v = byId('vehicles', b.dataset.vdel); if (!v || !confirm(`למחוק את הרכב ${v.plate}? לא ניתן לשחזר.`)) return;
+    return deleteVehicle(v).then(r => { if (r!==false) toast('נמחק'); }).catch(err => toast('שגיאה: '+err.message));
+  }
+  if (b.id==='vReset'){ Object.assign(ui, {vq:'', vband:'', vcorp:'', vtype:''}); return render(); }
   if (b.dataset.rng){
     const d = new Date(), y = d.getFullYear(), m = d.getMonth();
     const iso = x => x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
@@ -779,7 +850,7 @@ $('#view').addEventListener('click', e => {
   ({addV:()=>vehicleForm(), addD:()=>driverForm(), addS:()=>serviceForm(), addE:()=>expenseForm(), xlsRep:exportReport}[b.id]||(()=>{}))();
 });
 $('#view').addEventListener('input', e => {
-  const map = {vq:'vq',dq:'dq',sv:'sv',st:'st',ev:'ev',ec:'ec',fFrom:'from',fTo:'to'};
+  const map = {vq:'vq',vcorp:'vcorp',vtype:'vtype',dq:'dq',sv:'sv',st:'st',ev:'ev',ec:'ec',fFrom:'from',fTo:'to'};
   if (map[e.target.id]){ ui[map[e.target.id]] = e.target.value; render(); }
 });
 
@@ -793,7 +864,7 @@ function exportReport(){
 }
 function exportAll(){
   const wb = XLSX.utils.book_new(), P = id => (byId('vehicles',id)||{}).plate || '';
-  XLSX.utils.book_append_sheet(wb, sheet(sortedVehicles().map(v=>({'מספר רישוי':v.plate,'יצרן':v.make,'דגם':v.model,'שנה':v.year,'צבע':v.color,'הנעה':FUEL[v.fuel],'בעלות':OWN[v.ownership],'ליסינג/בעלים':v.leaseCompany,'סטטוס':VSTAT[v.status],'ק"מ':v.km,'טסט עד':v.licenseExpiry,'ביטוח חובה עד':v.insuranceExpiry,'מקיף עד':v.compExpiry,'נהג נוכחי':dName((openAssignment(v.id)||{}).driverId),'הערות':v.notes}))), 'רכבים');
+  XLSX.utils.book_append_sheet(wb, sheet(sortedVehicles().map(v=>({'מספר רישוי':v.plate,'יצרן':v.make,'דגם':v.model,'שנה':v.year,'צבע':v.color,'הנעה':FUEL[v.fuel],'בעלות':OWN[v.ownership],'ליסינג/בעלים':v.leaseCompany,'סוג כלי':v.vtype,'קבוצה':v.group,'תאגיד':v.corp,'שימוש':v.usage,'סטטוס':VSTAT[v.status],'ק"מ':v.km,'טסט עד':v.licenseExpiry,'ביטוח חובה עד':v.insuranceExpiry,'מקיף עד':v.compExpiry,'נהג נוכחי':dName((openAssignment(v.id)||{}).driverId),'הערות':v.notes}))), 'רכבים');
   XLSX.utils.book_append_sheet(wb, sheet(S.drivers.map(d=>({'שם':d.name,'ת"ז/מס עובד':d.idNumber,'טלפון':d.phone,'אימייל':d.email,'מחלקה':d.department,'מס רישיון':d.licenseNumber,'דרגה':d.licenseClass,'רישיון עד':d.licenseExpiry,'פעיל':d.active===false?'לא':'כן','הערות':d.notes}))), 'נהגים');
   XLSX.utils.book_append_sheet(wb, sheet([...S.assignments].sort((a,b)=>a.start.localeCompare(b.start)).map(a=>({'רכב':P(a.vehicleId),'נהג':dName(a.driverId),'מתאריך':a.start,'ק"מ במסירה':a.startKm,'עד תאריך':a.end,'ק"מ בהחזרה':a.endKm,'הערות':[a.notes,a.returnNotes].filter(Boolean).join(' · ')}))), 'שיוכים');
   XLSX.utils.book_append_sheet(wb, sheet([...S.services].sort((a,b)=>a.date.localeCompare(b.date)).map(s=>({'תאריך':s.date,'רכב':P(s.vehicleId),'סוג':STYPE[s.type],'ק"מ':s.km,'מוסך':s.garage,'חשבונית':s.invoice,'תיאור':s.description,'עלות':s.cost,'טיפול הבא ק"מ':s.nextKm,'טיפול הבא תאריך':s.nextDate}))), 'טיפולים');

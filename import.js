@@ -268,7 +268,8 @@ $('#iBody').addEventListener('click', async e => {
 const TARGETS = {
   vehicles: {label:'רכבים', fields:[
     ['plate','מספר רישוי',1],['make','יצרן'],['model','דגם'],['year','שנת ייצור','n'],['color','צבע'],['km','קילומטראז\'','n'],
-    ['licenseExpiry','טסט בתוקף עד','d'],['insuranceExpiry','ביטוח חובה עד','d'],['compExpiry','ביטוח מקיף עד','d'],['leaseCompany','חברת ליסינג / בעלים'],['notes','הערות']]},
+    ['licenseExpiry','טסט בתוקף עד','d'],['insuranceExpiry','ביטוח חובה עד','d'],['compExpiry','ביטוח מקיף עד','d'],['leaseCompany','חברת ליסינג / בעלים'],['fuel','מנוע / הנעה','f'],
+    ['vtype','סוג כלי'],['group','קבוצה'],['corp','תאגיד'],['usage','שימוש'],['notes','הערות']]},
   drivers: {label:'נהגים', fields:[
     ['name','שם',1],['idNumber','ת"ז / מס\' עובד'],['phone','טלפון'],['email','אימייל'],['department','מחלקה'],
     ['licenseNumber','מספר רישיון נהיגה'],['licenseClass','דרגת רישיון'],['licenseExpiry','תוקף רישיון נהיגה','d'],['notes','הערות']]},
@@ -283,8 +284,10 @@ const SYN = {
   plate:['מספר רישוי','מס רישוי','מספר רכב','מס רכב','מספר הרכב','לוחית רישוי','רישוי','plate','license plate','car number'],
   make:['יצרן','תוצר','make','manufacturer'], model:['דגם','תאור דגם','model'], year:['שנת ייצור','שנת יצור','שנתון','year'],
   color:['צבע','color'], km:['קילומטראז','קילומטרז','מד אוץ','מונה','ק"מ','odometer','mileage','km'],
-  licenseExpiry:['תוקף רישיון רכב','רישיון רכב','תוקף רישוי','טסט','תוקף טסט'], insuranceExpiry:['ביטוח חובה','חובה עד','תוקף חובה'],
-  compExpiry:['ביטוח מקיף','מקיף'], leaseCompany:['חברת ליסינג','ליסינג','בעלים'],
+  licenseExpiry:['תוקף רישיון רכב','רישיון רכב','תוקף רישוי','טסט','תוקף טסט'], insuranceExpiry:['ביטוח חובה','חובה עד','תוקף חובה','תוקף ביטוח'],
+  compExpiry:['ביטוח מקיף','מקיף'], leaseCompany:['חברת ליסינג','ליסינג','בעלים','בעלות'],
+  fuel:['מנוע','סוג הנעה','הנעה','סוג דלק','fuel'], vtype:['סוג כלי','סוג הכלי','סוג רכב','סוג'], group:['קבוצה','שיוך','מחלקה','ענף'],
+  corp:['תאגיד','חברה','ישות'], usage:['שימוש  נהג','שימוש','נהג','משתמש'],
   name:['שם מלא','שם הנהג','שם נהג','שם העובד','שם עובד','שם','name','driver name'], idNumber:['תעודת זהות','ת"ז','מספר עובד','מס עובד','id'],
   phone:['טלפון נייד','נייד','טלפון','פלאפון','phone','mobile'], email:['אימייל','דוא"ל','מייל','email'], department:['מחלקה','ענף','אגף','department'],
   licenseNumber:['מספר רישיון נהיגה','מספר רישיון','מס רישיון'], licenseClass:['דרגת רישיון','דרגה','סוג רישיון'],
@@ -332,6 +335,15 @@ function parseDate(v){
   m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/);
   if (m){ let y = +m[3]; if (y < 100) y += 2000; const d = +m[1], mo = +m[2]; if (mo>=1 && mo<=12 && d>=1 && d<=31) return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
   return null;
+}
+function parseFuel(v){
+  const s = String(v ?? '').toLowerCase();
+  if (!s.trim()) return '';
+  if (/חשמל|electric|ev\b/.test(s)) return 'electric';
+  if (/היבריד|hybrid/.test(s)) return 'hybrid';
+  if (/דיזל|סולר|diesel/.test(s)) return 'diesel';
+  if (/בנזין|petrol|gasoline|gas/.test(s)) return 'petrol';
+  return '';
 }
 function parseNum(v){
   if (v === '' || v == null) return null;
@@ -427,6 +439,7 @@ function impBuild(){
       let v = raw;
       if (kind === 'd'){ v = parseDate(raw); if (v === null){ errs.push('תאריך לא תקין'); v = ''; } }
       else if (kind === 'n'){ v = parseNum(raw); if (Number.isNaN(v)){ errs.push('מספר לא תקין'); v = null; } }
+      else if (kind === 'f') v = parseFuel(raw);
       else v = String(raw ?? '').trim();
       if (req === 1 && (v === '' || v == null)) errs.push('חסר ' + TARGETS[T].fields.find(f=>f[0]===k)[1]);
       rec[k] = v;
@@ -474,7 +487,7 @@ function impPreview(){
   const T = TARGETS[sh.target], cols = T.fields.filter(f => sh.map[f[0]]!=='' && sh.map[f[0]]!=null);
   const cnt = s => sh.rows.filter(r=>r.status===s).length;
   const show = sh.rows.slice(0, 400);
-  const cell = (k, v) => k==='plate' ? `<span class="plate">${esc(v)}</span>` : k==='category' ? esc(ECAT[v]||v) : k==='type' && sh.target==='services' ? esc(STYPE[v]||v)
+  const cell = (k, v) => k==='plate' ? `<span class="plate">${esc(v)}</span>` : k==='category' ? esc(ECAT[v]||v) : k==='fuel' ? esc(FUEL[v]||v) : k==='type' && sh.target==='services' ? esc(STYPE[v]||v)
     : /date|Expiry/.test(k) ? fmtD(v) : (typeof v === 'number') ? nf1.format(v) : esc(v);
   impShow('תצוגה מקדימה: ' + sh.entry.path, `
     <div class="toolbar">

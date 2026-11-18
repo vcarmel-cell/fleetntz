@@ -115,54 +115,152 @@ function guessVehicle(path){
 }
 function impScan(list){
   IMP.files = list;
-  const sheets = list.filter(x => SHEET_EXT.test(x.path)), docs = list.filter(x => DOC_EXT.test(x.path));
-  IMP.docs = docs.map(x => ({...x, vehicleId: guessVehicle(x.path), docType: guessDocType(x.path), on: true}));
-  const vOpts = vehOpts('— בחר רכב —', true);
+  IMP.sheets = list.filter(x => SHEET_EXT.test(x.path));
+  IMP.docs = list.filter(x => DOC_EXT.test(x.path)).map(x => ({...x, vehicleId: guessVehicle(x.path), docType: guessDocType(x.path), on: true}));
+  IMP.extMsg = ''; IMP.attMsg = '';
+  impRender();
+}
+const EXTRACT_URL = 'https://fleetntz-extract.vcarmel-cell.workers.dev/extract';
+const fileB64 = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
+const mediaOf = f => f.type || (/\.pdf$/i.test(f.name) ? 'application/pdf' : /\.png$/i.test(f.name) ? 'image/png' : /\.webp$/i.test(f.name) ? 'image/webp' : 'image/jpeg');
+const EXT_ERR = {unauthorized:'נדרשת התחברות מחדש', unsupported_file:'סוג קובץ לא נתמך', file_too_large:'קובץ גדול מדי', rate_limited:'עומס — נסה שוב בעוד דקה', server_key_invalid:'מפתח השרת לא תקין', refused:'המסמך נדחה לעיבוד'};
+
+async function extractDoc(d){
+  const token = await auth.currentUser.getIdToken();
+  const r = await fetch(EXTRACT_URL, {method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+token},
+    body: JSON.stringify({fileName: d.file.name, mediaType: mediaOf(d.file), data: await fileB64(d.file)})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(EXT_ERR[j.error] || ('שגיאה ' + r.status));
+  return j.fields;
+}
+const amt = s => { const n = parseNum(s); return n == null || Number.isNaN(n) ? null : n; };
+const isoOk = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') ? s : '';
+
+/* turn extracted fields into a suggested change: {text, dup, run()} */
+function suggest(d){
+  const x = d.ext; d.action = null; d.warn = '';
+  if (!x) return;
+  d.docType = x.docType;
+  const v = vehByPlate(x.plate);
+  if (v && !d.userVeh) d.vehicleId = v.id;
+  if (x.plate && !v && x.docType !== 'dlicense') d.warn = `מספר רישוי ${x.plate} לא קיים במערכת`;
+  const vid = () => d.vehicleId, date = isoOk(x.date) || today(), exp = isoOk(x.expiryDate), sum$ = amt(x.amount), km$ = amt(x.km);
+  const veh = byId('vehicles', d.vehicleId);
+  if (x.docType === 'vlicense' && exp){
+    const extra = {};
+    if (veh){ if (!veh.make && x.make) extra.make = x.make; if (!veh.model && x.model) extra.model = x.model; if (!veh.year && x.year) extra.year = Number(x.year); }
+    d.action = {text: `עדכון תוקף טסט ל-${fmtD(exp)}`, run: () => save('vehicles', vid(), {licenseExpiry: exp, ...extra})};
+  } else if (x.docType === 'insurance' && exp){
+    const k = x.insuranceKind, o = {};
+    if (k === 'mandatory' || k === 'both') o.insuranceExpiry = exp;
+    if (k === 'comprehensive' || k === 'both' || k === 'third_party') o.compExpiry = exp;
+    if (!Object.keys(o).length) o.insuranceExpiry = exp;
+    const label = [o.insuranceExpiry && 'ביטוח חובה', o.compExpiry && 'ביטוח מקיף'].filter(Boolean).join(' + ');
+    d.action = {text: `עדכון ${label} עד ${fmtD(exp)}` + (sum$ ? ` · הוצאת ביטוח ${money(sum$)}` : ''), run: async () => {
+      await save('vehicles', vid(), o);
+      if (sum$) await save('expenses', null, {vehicleId: vid(), date, category:'insurance', amount: sum$, supplier: x.supplier, notes: x.description, driverId:'', source:'doc'});
+    }};
+  } else if (x.docType === 'invoice' && sum$){
+    const dup = S.services.some(s => s.vehicleId===d.vehicleId && s.date===date && Number(s.cost)===sum$);
+    if (dup) d.warn = 'טיפול זהה כבר קיים';
+    d.action = {text: `טיפול חדש: ${STYPE[x.serviceType]||'תיקון'} · ${money(sum$)}${x.supplier?' · '+x.supplier:''}`, dup, run: async () => {
+      await save('services', null, {vehicleId: vid(), date, type: x.serviceType || 'repair', cost: sum$, garage: x.supplier, km: km$, description: x.description, source:'doc'});
+      await bumpKm(vid(), km$);
+    }};
+  } else if ((x.docType === 'fine' || x.docType === 'fuel') && sum$){
+    const cat = x.docType;
+    const dup = S.expenses.some(e => e.vehicleId===d.vehicleId && e.date===date && Number(e.amount)===sum$ && e.category===cat);
+    if (dup) d.warn = 'הוצאה זהה כבר קיימת';
+    d.action = {text: `${cat==='fine'?'דוח':'תדלוק'} ${money(sum$)} מ-${fmtD(date)}` + (x.dueDate ? ` · לתשלום עד ${fmtD(x.dueDate)}` : ''), dup, run: async () => {
+      await save('expenses', null, {vehicleId: vid(), date, category: cat, amount: sum$, km: km$, supplier: x.supplier, notes: x.description,
+        driverId: driverAt(vid(), date), ...(cat==='fine' ? {paid:false, dueDate: isoOk(x.dueDate)} : {}), source:'doc'});
+      await bumpKm(vid(), km$);
+    }};
+  } else if (x.docType === 'dlicense'){
+    const drv = S.drivers.find(r => (x.driverIdNumber && digits(r.idNumber)===digits(x.driverIdNumber)) || (x.driverLicenseNumber && digits(r.licenseNumber)===digits(x.driverLicenseNumber)) || (x.driverName && norm(r.name)===norm(x.driverName)));
+    d.driverId = drv ? drv.id : '';
+    const o = {}; if (exp) o.licenseExpiry = exp; if (x.driverLicenseNumber) o.licenseNumber = x.driverLicenseNumber; if (x.driverIdNumber) o.idNumber = x.driverIdNumber;
+    d.action = drv ? {text: `עדכון רישיון נהיגה של ${drv.name}${exp?' עד '+fmtD(exp):''}`, run: () => save('drivers', drv.id, o)}
+      : x.driverName ? {text: `נהג חדש: ${x.driverName}${exp?' · רישיון עד '+fmtD(exp):''}`, run: async () => { d.driverId = await save('drivers', null, {name: x.driverName, active:true, ...o}); }}
+      : null;
+    if (!d.action) d.warn = 'לא זוהה שם נהג';
+  }
+  d.apply = !!d.action && !d.action.dup;
+}
+
+function impRender(){
+  const sheets = IMP.sheets || [], docs = IMP.docs || [], vOpts = vehOpts('— בחר רכב —', true), busy = IMP.busy;
+  const extInfo = d => d.extErr ? `<span class="tag bad">${esc(d.extErr)}</span>` : d.extracting ? '<span class="sub">קורא…</span>' : !d.ext ? '<span class="sub">—</span>' : `
+    <div class="sub">${[d.ext.plate && 'רכב '+d.ext.plate, d.ext.date && fmtD(d.ext.date), d.ext.expiryDate && 'תוקף '+fmtD(d.ext.expiryDate), d.ext.amount && money(amt(d.ext.amount)), d.ext.supplier, d.ext.description].filter(Boolean).map(esc).join(' · ')}${d.ext.confidence==='low'?' · <b>זיהוי חלקי</b>':''}</div>
+    ${d.action ? `<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" data-iapply="${docs.indexOf(d)}" ${d.apply?'checked':''}> ${esc(d.action.text)}</label>` : ''}
+    ${d.warn ? `<span class="tag warn">${esc(d.warn)}</span>` : ''}`;
   impShow('ייבוא מתיקייה', `
     <div class="hint">נמצאו ${sheets.length} קובצי אקסל / CSV ו-${docs.length} מסמכים (PDF / תמונות).</div>
     <h3>קובצי אקסל / CSV</h3>
     ${sheets.length ? `<div class="tbl-wrap"><table><thead><tr><th>קובץ</th><th class="num">גודל</th><th></th></tr></thead><tbody>
-      ${sheets.map((x,i)=>`<tr><td class="wrap">${esc(x.path)}</td><td class="num">${fmtSize(x.file.size)}</td>
+      ${sheets.map(x=>`<tr><td class="wrap">${esc(x.path)}</td><td class="num">${fmtSize(x.file.size)}</td>
         <td><button class="btn sm primary" data-isheet="${IMP.files.indexOf(x)}">ייבוא נתונים</button></td></tr>`).join('')}
     </tbody></table></div>` : '<div class="tbl-wrap"><div class="empty">אין קובצי אקסל בתיקייה</div></div>'}
-    <h3>מסמכים לצירוף</h3>
-    ${docs.length ? `<p class="sub">המערכת ניחשה את הרכב לפי מספר רישוי בשם הקובץ או התיקייה, ואת סוג המסמך לפי שם הקובץ. בדוק ותקן לפני הצירוף.</p>
-      <div class="tbl-wrap"><table><thead><tr><th><input type="checkbox" id="iAllDocs" checked aria-label="בחירת הכל"></th><th>קובץ</th><th>רכב</th><th>סוג</th><th class="num">גודל</th></tr></thead><tbody>
-      ${IMP.docs.map((d,i)=>`<tr><td><input type="checkbox" data-idon="${i}" ${d.on?'checked':''} aria-label="לצרף"></td>
-        <td class="wrap">${esc(d.path)}</td>
-        <td><select data-idveh="${i}" style="min-width:190px">${vOpts.map(o=>`<option value="${o.v}" ${o.v===d.vehicleId?'selected':''}>${esc(o.t)}</option>`).join('')}</select></td>
+    <h3>מסמכים</h3>
+    ${docs.length ? `<p class="sub">"קריאת המסמכים" מזהה בכל מסמך את סוגו, מספר הרישוי, תאריכים וסכומים, ומציעה עדכון (תוקף טסט / ביטוח, טיפול, דוח, תדלוק, רישיון נהיגה). בדוק את ההצעות לפני הצירוף.</p>
+      <div class="toolbar"><button class="btn" id="iExtract" ${busy?'disabled':''}>קריאת המסמכים המסומנים</button><span class="sub">${esc(IMP.extMsg||'')}</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th><input type="checkbox" id="iAllDocs" ${docs.every(d=>d.on)?'checked':''} aria-label="בחירת הכל"></th><th>קובץ</th><th>רכב / נהג</th><th>סוג</th><th>נתונים שזוהו ועדכון מוצע</th></tr></thead><tbody>
+      ${docs.map((d,i)=>`<tr><td><input type="checkbox" data-idon="${i}" ${d.on?'checked':''} aria-label="לצרף"></td>
+        <td class="wrap">${esc(d.path)}<div class="sub">${fmtSize(d.file.size)}</div></td>
+        <td>${d.docType==='dlicense' ? `<span class="sub">${d.driverId ? esc(dName(d.driverId)) : 'נהג'}</span>` :
+          `<select data-idveh="${i}" style="min-width:170px">${vOpts.map(o=>`<option value="${o.v}" ${o.v===d.vehicleId?'selected':''}>${esc(o.t)}</option>`).join('')}</select>`}</td>
         <td><select data-idtype="${i}">${Object.entries(DOCTYPE).map(([k,t])=>`<option value="${k}" ${k===d.docType?'selected':''}>${t}</option>`).join('')}</select></td>
-        <td class="num">${fmtSize(d.file.size)}</td></tr>`).join('')}
+        <td class="wrap">${extInfo(d)}</td></tr>`).join('')}
       </tbody></table></div>
-      <div class="toolbar"><button class="btn primary" id="iAttach">צירוף המסמכים המסומנים</button><span class="sub" id="iAttMsg"></span></div>
-      <p class="sub">שליפה אוטומטית של נתונים מתוך ה-PDF (תוקף, סכומים, מוסך) תתווסף בשלב הבא.</p>`
+      <div class="toolbar"><button class="btn primary" id="iAttach" ${busy?'disabled':''}>צירוף המסמכים המסומנים${docs.some(d=>d.on&&d.apply)?' ועדכון הנתונים':''}</button><span class="sub">${esc(IMP.attMsg||'')}</span></div>`
     : '<div class="tbl-wrap"><div class="empty">אין מסמכים בתיקייה</div></div>'}`,
     `<button class="btn" type="button" id="iBack">בחירת תיקייה אחרת</button>${closeBtn}`);
   $('#iBack').onclick = impStart;
 }
 $('#iBody').addEventListener('change', e => {
-  const t = e.target, ds = t.dataset;
+  const t = e.target, ds = t.dataset; if (!IMP.docs) return;
   if (ds.idon) IMP.docs[ds.idon].on = t.checked;
-  if (ds.idveh) IMP.docs[ds.idveh].vehicleId = t.value;
-  if (ds.idtype) IMP.docs[ds.idtype].docType = t.value;
-  if (t.id === 'iAllDocs'){ IMP.docs.forEach(d=>d.on=t.checked); document.querySelectorAll('[data-idon]').forEach(c=>c.checked=t.checked); }
+  if (ds.idveh){ const d = IMP.docs[ds.idveh]; d.vehicleId = t.value; d.userVeh = true; if (d.ext){ suggest(d); impRender(); } }
+  if (ds.idtype){ const d = IMP.docs[ds.idtype]; d.docType = t.value; if (d.ext){ d.ext.docType = t.value; suggest(d); } impRender(); }
+  if (ds.iapply) IMP.docs[ds.iapply].apply = t.checked;
+  if (t.id === 'iAllDocs'){ IMP.docs.forEach(d=>d.on=t.checked); impRender(); }
 });
 $('#iBody').addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.isheet) return impSheet(IMP.files[+b.dataset.isheet]);
+  if (b.id === 'iExtract'){
+    const sel = IMP.docs.filter(d => d.on && !d.ext);
+    if (!sel.length) return toast(IMP.docs.some(d=>d.on) ? 'המסמכים המסומנים כבר נקראו' : 'לא נבחרו מסמכים');
+    IMP.busy = true; let done = 0;
+    IMP.extMsg = `קורא 0 מתוך ${sel.length}…`; impRender();
+    const queue = [...sel];
+    const work = async d => {
+      d.extracting = true; d.extErr = ''; impRender();
+      try { d.ext = await extractDoc(d); suggest(d); } catch(err){ d.extErr = err.message; }
+      d.extracting = false; IMP.extMsg = `נקראו ${++done} מתוך ${sel.length}…`; impRender();
+    };
+    await Promise.all([0,1].map(async () => { while (queue.length) await work(queue.shift()); }));
+    IMP.busy = false; IMP.extMsg = `הקריאה הושלמה (${sel.length} מסמכים)`; impRender();
+    return;
+  }
   if (b.id === 'iAttach'){
     const sel = IMP.docs.filter(d => d.on);
     if (!sel.length) return toast('לא נבחרו מסמכים');
-    if (sel.some(d => !d.vehicleId)) return toast('יש מסמכים מסומנים ללא רכב — בחר רכב או בטל את הסימון');
-    b.disabled = true; let n = 0, fail = 0;
+    const noOwner = sel.filter(d => d.docType==='dlicense' ? !(d.driverId || (d.apply && d.action)) : !d.vehicleId);
+    if (noOwner.length) return toast(`ב-${noOwner.length} מסמכים מסומנים חסר רכב (או נהג לרישיון נהיגה) — השלם או בטל את הסימון`);
+    IMP.busy = true; let n = 0, fail = 0, applied = 0;
     for (const d of sel){
-      $('#iAttMsg').textContent = `מעלה ${++n} מתוך ${sel.length}…`;
-      if (d.file.size > 20*1048576){ fail++; continue; }
-      try { await uploadDoc(d.file, 'v', d.vehicleId, d.docType, 'folder'); d.on = false; d.done = true; } catch(err){ console.error(err); fail++; }
+      IMP.attMsg = `מעבד ${++n} מתוך ${sel.length}…`; impRender();
+      try {
+        if (d.apply && d.action){ await d.action.run(); applied++; d.apply = false; }
+        const isDrv = d.docType === 'dlicense';
+        await uploadDoc(d.file, isDrv ? 'd' : 'v', isDrv ? d.driverId : d.vehicleId, d.docType, 'folder');
+        d.done = true;
+      } catch(err){ console.error(err); fail++; d.extErr = 'נכשל: ' + err.message; }
     }
-    $('#iAttMsg').textContent = `צורפו ${n-fail} מסמכים` + (fail ? ` · ${fail} נכשלו` : '');
-    IMP.docs = IMP.docs.filter(d => !d.done);
-    toast('המסמכים צורפו'); b.disabled = false;
+    IMP.docs = IMP.docs.filter(d => !d.done); IMP.busy = false;
+    IMP.attMsg = `צורפו ${n-fail} מסמכים` + (applied ? ` · ${applied} עדכוני נתונים` : '') + (fail ? ` · ${fail} נכשלו` : '');
+    impRender(); toast('הסתיים');
   }
 });
 
@@ -298,7 +396,7 @@ function impMapping(){
         <td class="sub">${sample.map(r => sh.map[k]!=null && sh.map[k]!=='' ? esc(String(r[sh.map[k]]).slice(0,30)) : '').filter(Boolean).join(' · ')}</td></tr>`).join('')}
     </tbody></table></div>`,
     `<button class="btn primary" type="button" id="iPreview">המשך לתצוגה מקדימה</button><button class="btn" type="button" id="iBackList">חזרה</button>${closeBtn}`);
-  $('#iBackList').onclick = () => impScan(IMP.files);
+  $('#iBackList').onclick = impRender;
   $('#iPreview').onclick = () => {
     const miss = T.fields.filter(f => f[2]===1 && (sh.map[f[0]]==null || sh.map[f[0]]==='')).map(f=>f[1]);
     if (miss.length) return toast('חסרה התאמה לשדות חובה: ' + miss.join(', '));
@@ -441,6 +539,6 @@ async function impCommit(){
     toast(`יובאו ${sel.length} שורות`);
     impShow('הייבוא הושלם', `<div class="hint">יובאו ${sel.length} שורות ל${TARGETS[T].label}.${sh.newPlates.size ? ` נוצרו ${sh.newPlates.size} רכבים חדשים — יש להשלים את פרטיהם בלשונית רכבים.` : ''}</div>`,
       `<button class="btn primary" type="button" id="iMore">ייבוא קובץ נוסף מהתיקייה</button>${closeBtn}`);
-    $('#iMore').onclick = () => impScan(IMP.files);
+    $('#iMore').onclick = impRender;
   } catch(err){ console.error(err); toast('שגיאה בייבוא: '+err.message); $('#iCommit').disabled = false; }
 }

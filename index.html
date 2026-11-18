@@ -9,6 +9,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
@@ -203,8 +204,8 @@ firebase.initializeApp({
   appId: "1:1024441751127:web:6ef295fa03780d481df512"
 });
 const auth = firebase.auth(), db = firebase.firestore();
-const COLS = ['vehicles','drivers','assignments','services','expenses'];
-const S = {vehicles:[],drivers:[],assignments:[],services:[],expenses:[]};
+const COLS = ['vehicles','drivers','assignments','services','expenses','documents'];
+const S = {vehicles:[],drivers:[],assignments:[],services:[],expenses:[],documents:[]};
 let user = null, tab = 'dash', unsubs = [];
 const ui = {vq:'',vst:'active',dq:'',sv:'',st:'',ev:'',ec:'',from:'',to:''};
 
@@ -528,6 +529,7 @@ function vehicleCard(id){
     <h3>טיפולים ותיקונים (${sv.length})</h3>${servicesTable(sv, false)}
     <h3>הוצאות (${ex.length})</h3>${expensesTable(ex.slice(0,30), false)}${ex.length>30?'<div class="sub">מוצגות 30 האחרונות — הכל בלשונית דלק והוצאות</div>':''}
     <h3>היסטוריית נהגים (${as.length})</h3>${assignTable(as, 'v')}
+    ${docsSection('v', id)}
   `;
   $('#cAsg').onclick = () => assignForm(id);
   if (cur) $('#cRet').onclick = () => returnForm(id);
@@ -559,6 +561,7 @@ function driverCard(id){
     ${d.notes?`<div class="hint">${esc(d.notes)}</div>`:''}
     <h3>רכבים שהחזיק (${as.length})</h3>${assignTable(as, 'd')}
     <h3>הוצאות המשויכות לנהג (${ex.length})</h3>${expensesTable(ex.slice(0,40), true)}
+    ${docsSection('d', id)}
   `;
   $('#cEdit').onclick = () => driverForm(d);
   if (!$('#cardDlg').open) $('#cardDlg').showModal();
@@ -825,5 +828,6 @@ auth.onAuthStateChanged(u => {
   render();
 });
 </script>
+<script src="import.js"></script>
 </body>
 </html>

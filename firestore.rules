@@ -4,7 +4,7 @@ service cloud.firestore {
     // Self sign-up is disabled; only users created in the Firebase console can sign in.
     match /{col}/{id} {
       allow read, write: if request.auth != null
-        && col in ['vehicles','drivers','assignments','services','expenses'];
+        && col in ['vehicles','drivers','assignments','services','expenses','documents'];
     }
   }
 }

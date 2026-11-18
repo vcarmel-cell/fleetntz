@@ -100,6 +100,8 @@
   .seg{background:#fff;border:1px solid var(--hairline);border-radius:2px;padding:8px 14px;cursor:pointer;font-size:14px;white-space:nowrap;}
   .seg:hover{border-color:var(--ink-soft);}
   .seg[aria-pressed="true"]{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600;}
+  table.vt th,table.vt td{text-align:center;vertical-align:middle;}
+  table.vt .row-actions{justify-content:center;}
   td.note{white-space:normal;min-width:120px;max-width:220px;font-size:13px;color:var(--ink-soft);}
   @media (max-width:700px){ .cards.bands{grid-template-columns:repeat(2,minmax(0,1fr));} }
   .empty{text-align:center;color:var(--ink-grey);padding:30px 10px;}
@@ -715,15 +717,15 @@ function renderVehicles(){
       <button class="btn" id="vReset">איפוס סינון</button>
       <span class="sub">${rows.length} כלים</span>
     </div>
-    ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>#</th><th>יצרן</th><th>דגם / סוג</th><th>שנה</th><th>מס' רישוי</th><th>תוקף טסט</th><th>תוקף ביטוח</th><th>בעלות</th><th>שימוש / נהג</th><th>מנוע</th><th>תאגיד</th><th>הערות</th><th>פעולות</th></tr></thead><tbody>
+    ${rows.length ? `<div class="tbl-wrap"><table class="vt"><thead><tr><th>#</th><th>יצרן</th><th>דגם / סוג</th><th>שנה</th><th>מס' רישוי</th><th>תוקף טסט</th><th>תוקף ביטוח</th><th>בעלות</th><th>שימוש / נהג</th><th>מנוע</th><th>תאגיד</th><th>הערות</th><th>פעולות</th></tr></thead><tbody>
       ${rows.map((v,i)=>{ const a = openAssignment(v.id), ins = insDate(v); return `<tr>
         <td class="sub">${i+1}</td>
         <td><b>${esc(v.make)}</b></td>
         <td>${esc(v.model)}${v.vtype?` <span class="sub">${esc(v.vtype)}</span>`:''}</td>
         <td>${esc(v.year||'')}</td>
         <td><button class="lnk" data-veh="${v.id}" title="פתיחת כרטיס הרכב">${plateHtml(v)}</button>${v.status==='garage'?' <span class="tag warn">במוסך</span>':''}</td>
-        <td style="text-align:center">${expTag(v.licenseExpiry)}</td>
-        <td style="text-align:center" ${v.insuranceExpiry&&v.compExpiry?`title="חובה: ${fmtD(v.insuranceExpiry)} · מקיף: ${fmtD(v.compExpiry)}"`:''}>${ins ? expTag(ins.date, ins.kind) : expTag('')}</td>
+        <td>${expTag(v.licenseExpiry)}</td>
+        <td ${v.insuranceExpiry&&v.compExpiry?`title="חובה: ${fmtD(v.insuranceExpiry)} · מקיף: ${fmtD(v.compExpiry)}"`:''}>${ins ? expTag(ins.date, ins.kind) : expTag('')}</td>
         <td>${esc(v.leaseCompany || OWN[v.ownership] || '')}</td>
         <td>${a ? `<button class="lnk" data-drv="${a.driverId}">${esc(dName(a.driverId))}</button>` : esc(v.usage||'') || '<span class="sub">—</span>'}</td>
         <td>${esc(FUEL[v.fuel]||'')}</td>
